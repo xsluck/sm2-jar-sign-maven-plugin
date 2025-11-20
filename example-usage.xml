@@ -1,0 +1,171 @@
+<!-- 
+    SM2 JAR Sign Maven Plugin 使用示例
+    将此配置添加到您的项目 pom.xml 中
+-->
+
+<!-- 方式1: 签名时自动验证（推荐） -->
+<build>
+    <plugins>
+        <plugin>
+            <groupId>com.github.xsluck</groupId>
+            <artifactId>sm2-jar-sign-maven-plugin</artifactId>
+            <version>0.0.1</version>
+            <executions>
+                <!-- 在 package 阶段签名并自动验证 -->
+                <execution>
+                    <id>sign-jar</id>
+                    <phase>package</phase>
+                    <goals>
+                        <goal>sign</goal>
+                    </goals>
+                    <configuration>
+                        <jarFile>${project.build.directory}/${project.build.finalName}.jar</jarFile>
+                        <keyFile>${project.basedir}/keystore/sm2-pkcs8.key</keyFile>
+                        <certFile>${project.basedir}/keystore/sm2.crt</certFile>
+                        <alias>sm2signer</alias>
+                        <!-- 签名后自动验证（默认 true） -->
+                        <verify>true</verify>
+                    </configuration>
+                </execution>
+            </executions>
+        </plugin>
+    </plugins>
+</build>
+
+<!-- 方式2: 签名和验证分开执行 -->
+<build>
+    <plugins>
+        <plugin>
+            <groupId>com.github.xsluck</groupId>
+            <artifactId>sm2-jar-sign-maven-plugin</artifactId>
+            <version>0.0.1</version>
+            <executions>
+                <!-- 步骤1: 在 package 阶段签名 -->
+                <execution>
+                    <id>sign-jar</id>
+                    <phase>package</phase>
+                    <goals>
+                        <goal>sign</goal>
+                    </goals>
+                    <configuration>
+                        <jarFile>${project.build.directory}/${project.build.finalName}.jar</jarFile>
+                        <keyFile>${project.basedir}/keystore/sm2-pkcs8.key</keyFile>
+                        <certFile>${project.basedir}/keystore/sm2.crt</certFile>
+                        <alias>sm2signer</alias>
+                        <!-- 跳过自动验证 -->
+                        <verify>false</verify>
+                    </configuration>
+                </execution>
+                
+                <!-- 步骤2: 在 verify 阶段独立验证 -->
+                <execution>
+                    <id>verify-signature</id>
+                    <phase>verify</phase>
+                    <goals>
+                        <goal>verify</goal>
+                    </goals>
+                    <configuration>
+                        <jarFile>${project.build.directory}/${project.build.finalName}.jar</jarFile>
+                        <!-- 验证失败时构建失败（默认 true） -->
+                        <failOnError>true</failOnError>
+                        <!-- 显示详细信息 -->
+                        <verbose>true</verbose>
+                    </configuration>
+                </execution>
+            </executions>
+        </plugin>
+    </plugins>
+</build>
+
+<!-- 方式3: 使用 Properties 配置 -->
+<properties>
+    <!-- 签名配置 -->
+    <jar.sign.enabled>true</jar.sign.enabled>
+    <jar.sign.keyfile>${project.basedir}/keystore/sm2-pkcs8.key</jar.sign.keyfile>
+    <jar.sign.certfile>${project.basedir}/keystore/sm2.crt</jar.sign.certfile>
+    <jar.sign.alias>sm2signer</jar.sign.alias>
+    <jar.sign.verify>true</jar.sign.verify>
+</properties>
+
+<build>
+    <plugins>
+        <plugin>
+            <groupId>com.github.xsluck</groupId>
+            <artifactId>sm2-jar-sign-maven-plugin</artifactId>
+            <version>0.0.1</version>
+            <executions>
+                <execution>
+                    <id>sign-jar</id>
+                    <phase>package</phase>
+                    <goals>
+                        <goal>sign</goal>
+                    </goals>
+                    <configuration>
+                        <jarFile>${project.build.directory}/${project.build.finalName}.jar</jarFile>
+                        <keyFile>${jar.sign.keyfile}</keyFile>
+                        <certFile>${jar.sign.certfile}</certFile>
+                        <alias>${jar.sign.alias}</alias>
+                        <verify>${jar.sign.verify}</verify>
+                        <skip>${skipJarSign}</skip>
+                    </configuration>
+                </execution>
+            </executions>
+        </plugin>
+    </plugins>
+</build>
+
+<!-- 多环境配置 -->
+<profiles>
+    <!-- 开发环境 - 跳过签名 -->
+    <profile>
+        <id>dev</id>
+        <activation>
+            <activeByDefault>true</activeByDefault>
+        </activation>
+        <properties>
+            <skipJarSign>true</skipJarSign>
+        </properties>
+    </profile>
+
+    <!-- 测试环境 - 启用签名和验证 -->
+    <profile>
+        <id>test</id>
+        <properties>
+            <skipJarSign>false</skipJarSign>
+            <jar.sign.keyfile>${project.basedir}/keystore/test-sm2-pkcs8.key</jar.sign.keyfile>
+            <jar.sign.certfile>${project.basedir}/keystore/test-sm2.crt</jar.sign.certfile>
+        </properties>
+    </profile>
+
+    <!-- 生产环境 - 启用签名和验证 -->
+    <profile>
+        <id>prod</id>
+        <properties>
+            <skipJarSign>false</skipJarSign>
+            <jar.sign.keyfile>${project.basedir}/keystore/prod-sm2-pkcs8.key</jar.sign.keyfile>
+            <jar.sign.certfile>${project.basedir}/keystore/prod-sm2.crt</jar.sign.certfile>
+        </properties>
+    </profile>
+</profiles>
+
+<!-- 
+使用命令：
+1. 开发环境（跳过签名）：
+   mvn clean package
+
+2. 生产环境（签名并验证）：
+   mvn clean package -Pprod
+
+3. 仅执行签名：
+   mvn sm2-jar-sign:sign -Djar.sign.keyfile=path/to/key
+
+4. 仅执行验证：
+   mvn sm2-jar-sign:verify -DjarFile=target/your-app.jar
+
+5. 跳过自动验证：
+   mvn clean package -Pprod -Djar.sign.verify=false
+
+6. 验证失败不中断构建：
+   mvn clean package -Pprod -DfailOnError=false
+-->
+

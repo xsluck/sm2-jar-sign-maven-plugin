@@ -19,10 +19,14 @@
 - ✅ 支持 SM3 摘要算法
 - ✅ 自动集成到 Maven 构建生命周期
 - ✅ 支持多环境配置（开发/测试/生产）
-- ✅ 支持 PEM 格式密钥和证书
+- ✅ 支持 PEM 格式密钥和证书（PKCS#8 和 EC PRIVATE KEY）
 - ✅ 自动验证签名完整性
 - ✅ 详细的构建日志输出
 - ✅ 支持跳过签名（开发环境）
+- ✅ 签名时显示文件统计信息
+- ✅ 验证时显示完整的证书信息
+- ✅ 证书有效期检查和过期提醒
+- ✅ 独立的验证 Goal（可单独验证 JAR 包）
 
 ## 🔧 环境要求
 
@@ -88,7 +92,11 @@ openssl pkcs8 -topk8 -nocrypt -in sm2.key -out sm2-pkcs8.key
 ### 4. 构建并签名
 
 ```bash
+# 签名并自动验证（推荐）
 mvn clean package
+
+# 签名后会自动验证签名是否正确
+# 如果验证失败，构建会中断
 ```
 
 ## ⚙️ 配置说明
@@ -101,8 +109,19 @@ mvn clean package
 | `keyFile` | File | 是 | - | SM2 私钥文件路径（PEM 格式，PKCS#8） |
 | `certFile` | File | 是 | - | SM2 证书文件路径（PEM 格式） |
 | `alias` | String | 否 | sm2signer | 签名别名 |
+| `password` | String | 否 | - | 私钥密码（如果私钥加密） |
 | `skip` | Boolean | 否 | false | 是否跳过签名 |
 | `outputFile` | File | 否 | - | 输出文件路径（默认覆盖原文件） |
+| `verify` | Boolean | 否 | true | 签名后是否自动验证 |
+
+### 验证插件参数
+
+| 参数 | 类型 | 必需 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `jarFile` | File | 是 | - | 要验证的 JAR 文件路径 |
+| `skip` | Boolean | 否 | false | 是否跳过验证 |
+| `failOnError` | Boolean | 否 | true | 验证失败时是否中断构建 |
+| `verbose` | Boolean | 否 | false | 是否显示详细验证信息 |
 
 ### 使用 Properties 配置
 
@@ -115,6 +134,7 @@ mvn clean package
     <jar.sign.keyfile>${project.basedir}/keystore/sm2-pkcs8.key</jar.sign.keyfile>
     <jar.sign.certfile>${project.basedir}/keystore/sm2.crt</jar.sign.certfile>
     <jar.sign.alias>sm2signer</jar.sign.alias>
+    <jar.sign.password></jar.sign.password>
 </properties>
 
 <build>
@@ -128,6 +148,7 @@ mvn clean package
                 <keyFile>${jar.sign.keyfile}</keyFile>
                 <certFile>${jar.sign.certfile}</certFile>
                 <alias>${jar.sign.alias}</alias>
+                <password>${jar.sign.password}</password>
                 <skip>${skipJarSign}</skip>
             </configuration>
         </plugin>
@@ -204,18 +225,89 @@ mvn clean package -Djar.sign.output=/path/to/signed.jar
 
 ### 验证签名
 
-使用 JDK 自带的 jarsigner 验证：
+**方法 1：自动验证（推荐）**
+
+插件默认在签名后自动验证，无需额外配置：
+
+```bash
+mvn clean package -Pprod
+```
+
+输出示例：
+```
+[INFO] ========================================
+[INFO] 开始使用SM2算法签名JAR包
+[INFO] JAR文件: /path/to/your-app-1.0.0.jar
+[INFO] 私钥文件: /path/to/sm2-pkcs8.key
+[INFO] 证书文件: /path/to/sm2.crt
+[INFO] 签名别名: sm2signer
+[INFO] ========================================
+[INFO] 解压JAR包...
+[INFO] 加载私钥和证书...
+[INFO] 创建签名文件...
+[INFO] 已为 1028 个文件添加 SM3 摘要
+[INFO] 重新打包JAR...
+[INFO] JAR包签名完成: /path/to/your-app-1.0.0.jar
+[INFO] ========================================
+[INFO] 
+[INFO] ========================================
+[INFO] 开始验证签名...
+[INFO] ========================================
+[INFO] 找到签名文件: META-INF/sm2signer.SF
+[INFO] 找到签名块文件: META-INF/sm2signer.SM2
+[INFO] 
+[INFO] 证书信息:
+[INFO]   签名算法: SM3withSM2
+[INFO]   证书主题: CN=JAR Signer, OU=IT, O=MyOrg, L=Beijing, ST=Beijing, C=CN
+[INFO]   证书颁发者: CN=JAR Signer, OU=IT, O=MyOrg, L=Beijing, ST=Beijing, C=CN
+[INFO]   证书序列号: 1234567890
+[INFO]   证书有效期: Mon Jan 01 00:00:00 CST 2024 至 Tue Dec 31 23:59:59 CST 2034
+[INFO]   证书状态: ✓ 有效
+[INFO]   公钥算法: EC
+[INFO]   公钥格式: X.509
+[INFO] 总文件数: 1028
+[INFO] 已添加摘要的文件数: 1028
+[INFO] 摘要验证通过的文件数: 1028
+[INFO] ========================================
+[INFO] ✓ 签名验证通过 - JAR包已正确签名
+[INFO] ========================================
+```
+
+**方法 2：独立验证**
+
+使用插件的 verify goal：
+
+```bash
+# 验证指定的 JAR 包
+mvn com.github.xsluck:sm2-jar-sign-maven-plugin:0.0.1:verify \
+    -DjarFile=target/your-app-1.0.0.jar
+
+# 显示详细信息
+mvn com.github.xsluck:sm2-jar-sign-maven-plugin:0.0.1:verify \
+    -DjarFile=target/your-app-1.0.0.jar \
+    -Dverbose=true
+
+# 验证失败不中断构建
+mvn com.github.xsluck:sm2-jar-sign-maven-plugin:0.0.1:verify \
+    -DjarFile=target/your-app-1.0.0.jar \
+    -DfailOnError=false
+```
+
+**方法 3：使用 JDK jarsigner**
 
 ```bash
 jarsigner -verify -verbose -certs target/your-app-1.0.0.jar
 ```
 
-使用自定义验证工具：
+**方法 4：检查签名文件**
 
 ```bash
-java -cp target/your-app-1.0.0.jar:lib/* \
-    com.example.security.JarSignatureVerifier \
-    target/your-app-1.0.0.jar
+# 查看 JAR 包中的签名文件
+jar -tf target/your-app-1.0.0.jar | grep META-INF
+# 应该看到：
+# META-INF/MANIFEST.MF
+# META-INF/sm2signer.SF
+# META-INF/sm2signer.SM2
 ```
 
 ## 🔐 密钥管理
@@ -368,20 +460,37 @@ build:
 
 ### Q4: 如何验证签名是否成功？
 
-**方法 1：使用 jarsigner**
+**方法 1：自动验证（推荐）**
+
+插件默认在签名后自动验证，查看构建日志：
+```bash
+mvn clean package -Pprod
+```
+
+如果看到以下输出，说明签名成功：
+```
+[INFO] ✓ 签名验证通过 - JAR包已正确签名
+```
+
+**方法 2：使用插件的 verify goal**
+```bash
+mvn com.github.xsluck:sm2-jar-sign-maven-plugin:0.0.1:verify \
+    -DjarFile=target/your-app.jar \
+    -Dverbose=true
+```
+
+**方法 3：使用 jarsigner**
 ```bash
 jarsigner -verify -verbose target/your-app.jar
 ```
 
-**方法 2：检查 META-INF 目录**
+**方法 4：检查 META-INF 目录**
 ```bash
 jar -tf target/your-app.jar | grep META-INF
-# 应该看到 .SF 和 .SM2 文件
-```
-
-**方法 3：使用自定义验证工具**
-```bash
-java -jar jar-signature-verifier.jar target/your-app.jar
+# 应该看到：
+# META-INF/MANIFEST.MF
+# META-INF/sm2signer.SF
+# META-INF/sm2signer.SM2
 ```
 
 ### Q5: 签名会影响性能吗？
@@ -390,6 +499,35 @@ java -jar jar-signature-verifier.jar target/your-app.jar
 - 开发环境跳过签名（`-Pdev`）
 - 仅在测试和生产环境启用签名
 - 使用 CI/CD 自动化签名过程
+
+### Q6: 如何查看证书信息？
+
+插件在验证签名时会自动显示证书信息，包括：
+- 签名算法（SM3withSM2）
+- 证书主题和颁发者
+- 证书序列号
+- 证书有效期
+- 证书状态（有效/过期）
+- 公钥算法和格式
+
+如果证书将在 90 天内过期，会显示警告信息。
+
+### Q7: 公钥存储在哪里？
+
+公钥包含在 X.509 证书中，证书嵌入在 JAR 包内部的签名块文件（`META-INF/xxx.SM2`）中。
+
+**结构：**
+```
+your-app.jar
+└── META-INF/
+    ├── MANIFEST.MF       # 文件摘要清单
+    ├── sm2signer.SF      # 签名文件
+    └── sm2signer.SM2     # 签名块（包含证书和签名）
+                          #   ├─ X.509 证书（包含公钥）
+                          #   └─ SM2 签名数据
+```
+
+运行时验证只需要 JAR 包本身，无需额外的公钥文件。
 
 ## 🎯 最佳实践
 
@@ -407,23 +545,48 @@ gmssl sm2keygen -pass "strong_password" -out prod-sm2.key
 
 ### 2. 自动化构建
 
+**方式 A：签名时自动验证（推荐）**
+
 ```xml
-<!-- 在 package 阶段自动签名 -->
 <execution>
     <id>sign-jar</id>
     <phase>package</phase>
     <goals>
         <goal>sign</goal>
     </goals>
+    <configuration>
+        <!-- 签名后自动验证（默认 true） -->
+        <verify>true</verify>
+    </configuration>
+</execution>
+```
+
+**方式 B：签名和验证分开执行**
+
+```xml
+<!-- 在 package 阶段签名 -->
+<execution>
+    <id>sign-jar</id>
+    <phase>package</phase>
+    <goals>
+        <goal>sign</goal>
+    </goals>
+    <configuration>
+        <verify>false</verify>
+    </configuration>
 </execution>
 
-<!-- 在 verify 阶段自动验证 -->
+<!-- 在 verify 阶段独立验证 -->
 <execution>
     <id>verify-signature</id>
     <phase>verify</phase>
     <goals>
         <goal>verify</goal>
     </goals>
+    <configuration>
+        <verbose>true</verbose>
+        <failOnError>true</failOnError>
+    </configuration>
 </execution>
 ```
 
@@ -457,12 +620,90 @@ public class Application {
 
 ### 5. 监控和日志
 
-```xml
-<configuration>
-    <verbose>true</verbose>
-    <logFile>${project.build.directory}/jar-sign.log</logFile>
-</configuration>
+插件会自动显示详细的签名和验证信息，包括：
+
+- 签名时：
+  - 处理的文件数量
+  - 签名进度
+  
+- 验证时：
+  - 证书详细信息（主题、颁发者、有效期等）
+  - 公钥信息（算法、格式）
+  - 文件完整性验证结果
+  - 证书有效性检查
+  - 证书过期提醒（90天内过期会警告）
+
+### 6. 证书信息
+
+验证时会自动显示以下证书信息：
+
 ```
+证书信息:
+  签名算法: SM3withSM2
+  证书主题: CN=JAR Signer, OU=IT, O=MyOrg
+  证书颁发者: CN=JAR Signer, OU=IT, O=MyOrg
+  证书序列号: 1234567890
+  证书有效期: 2024-01-01 至 2034-12-31
+  证书状态: ✓ 有效
+  公钥算法: EC
+  公钥格式: X.509
+```
+
+**注意：** 公钥信息包含在证书中，证书嵌入在 JAR 包的签名块文件（`.SM2`）中，无需单独存储。
+
+## 🔐 运行时签名验证
+
+### 应用启动时验证签名
+
+插件提供了运行时验证工具类 `JarSignatureVerifier.java`，可以在应用启动时验证 JAR 包签名。
+
+#### 使用方法
+
+**步骤 1：** 复制验证工具类到项目
+
+```bash
+cp src/main/java/com/github/xsluck/runtime/JarSignatureVerifier.java \
+   your-project/src/main/java/com/yourpackage/security/
+```
+
+**步骤 2：** 添加 BouncyCastle 依赖
+
+```xml
+<dependency>
+    <groupId>org.bouncycastle</groupId>
+    <artifactId>bcprov-jdk15on</artifactId>
+    <version>1.70</version>
+</dependency>
+```
+
+**步骤 3：** 在应用启动时调用
+
+```java
+public class Application {
+    public static void main(String[] args) {
+        // 启动时验证签名（非严格模式）
+        JarSignatureVerifier.checkSignatureOnStartup(false);
+        
+        // 或严格模式（验证失败则退出）
+        // JarSignatureVerifier.checkSignatureOnStartup(true);
+        
+        // 继续正常启动
+        SpringApplication.run(Application.class, args);
+    }
+}
+```
+
+#### 验证原理
+
+1. 从 JAR 包内部的签名块文件（`.SM2`）中提取 X.509 证书
+2. 从证书中获取公钥
+3. 使用公钥验证签名文件（`.SF`）的签名
+4. 验证 MANIFEST.MF 的摘要
+5. 验证所有文件的 SM3 摘要
+
+**重点：** 公钥在证书中，证书在 JAR 包内部，无需外部文件！
+
+详细使用说明请参考项目中的 `RUNTIME-VERIFICATION.md` 文档。
 
 ## 📚 相关资源
 
@@ -470,6 +711,7 @@ public class Application {
 - [BouncyCastle 文档](https://www.bouncycastle.org/documentation.html)
 - [国密算法标准](http://www.gmbz.org.cn/)
 - [Maven 插件开发指南](https://maven.apache.org/plugin-developers/)
+- [JAR 签名规范](https://docs.oracle.com/javase/8/docs/technotes/guides/jar/jar.html#Signed_JAR_File)
 
 ## 📄 许可证
 
@@ -486,6 +728,25 @@ public class Application {
 
 ---
 
-**版本**: 1.0.0  
+## 📝 更新日志
+
+### v0.0.2 (最新)
+- ✨ 新增：签名时显示处理的文件数量统计
+- ✨ 新增：验证时显示完整的证书信息（主题、颁发者、有效期等）
+- ✨ 新增：证书有效期检查和过期提醒（90天内过期会警告）
+- ✨ 新增：显示公钥算法和格式信息
+- 🐛 修复：递归处理子目录文件的签名问题
+- 🐛 修复：相对路径计算错误导致部分文件未签名的问题
+- 🐛 修复：Windows 系统路径分隔符兼容性问题
+- 📝 改进：更详细的日志输出和验证报告
+
+### v0.0.1
+- ✨ 基本的 SM2 JAR 签名功能
+- ✨ 支持 SM3 摘要算法
+- ✨ 自动验证签名完整性
+
+---
+
+**当前版本**: 0.0.2  
 **最后更新**: 2025-11-20
 

@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.security.KeyFactory;
 import java.security.MessageDigest;
 import java.security.PrivateKey;
+import java.security.PublicKey;
 import java.security.Security;
 import java.security.Signature;
 import java.security.cert.Certificate;
@@ -59,14 +60,14 @@ public class SM2JarSignMojo extends AbstractMojo {
     @Parameter(property = "alias", defaultValue = "sm2signer")
     private String alias;
 
-    @Parameter(property = "password")
-    private String password;
-
     @Parameter(property = "skip", defaultValue = "false")
     private boolean skip;
 
     @Parameter(property = "outputFile")
     private File outputFile;
+
+    @Parameter(property = "verify", defaultValue = "true")
+    private boolean verify;
 
     @Override
     public void execute() throws MojoExecutionException {
@@ -105,8 +106,174 @@ public class SM2JarSignMojo extends AbstractMojo {
             getLog().info("JAR包签名完成: " + signedJar.getAbsolutePath());
             getLog().info("========================================");
 
+            // 签名完成后自动验证
+            if (verify) {
+                getLog().info("");
+                getLog().info("========================================");
+                getLog().info("开始验证签名...");
+                getLog().info("========================================");
+
+                boolean verifyResult = verifySignature(signedJar);
+
+                if (verifyResult) {
+                    getLog().info("========================================");
+                    getLog().info("✓ 签名验证通过 - JAR包已正确签名");
+                    getLog().info("========================================");
+                } else {
+                    getLog().error("========================================");
+                    getLog().error("✗ 签名验证失败 - 请检查签名过程");
+                    getLog().error("========================================");
+                    throw new MojoExecutionException("签名验证失败");
+                }
+            }
+
         } catch (Exception e) {
             throw new MojoExecutionException("JAR包签名失败", e);
+        }
+    }
+
+    /**
+     * 验证签名
+     */
+    private boolean verifySignature(File jarFile) {
+        try (JarFile jar = new JarFile(jarFile, true)) {
+            // 1. 检查签名文件是否存在
+            boolean hasSignature = false;
+            String signerAlias = null;
+
+            Enumeration<JarEntry> entries = jar.entries();
+            while (entries.hasMoreElements()) {
+                JarEntry entry = entries.nextElement();
+                String name = entry.getName();
+
+                if (name.startsWith("META-INF/") && name.endsWith(".SF")) {
+                    hasSignature = true;
+                    signerAlias = name.substring(9, name.length() - 3);
+                    getLog().info("找到签名文件: " + name);
+                    break;
+                }
+            }
+
+            if (!hasSignature) {
+                getLog().error("未找到签名文件");
+                return false;
+            }
+
+            // 2. 检查签名块文件并提取证书信息
+            String[] extensions = { ".SM2", ".RSA", ".DSA", ".EC" };
+            boolean hasSignatureBlock = false;
+            byte[] sigBlockData = null;
+            String sigBlockFileName = null;
+
+            for (String ext : extensions) {
+                String fileName = "META-INF/" + signerAlias + ext;
+                JarEntry sigEntry = jar.getJarEntry(fileName);
+                if (sigEntry != null) {
+                    hasSignatureBlock = true;
+                    sigBlockFileName = fileName;
+                    getLog().info("找到签名块文件: " + fileName);
+
+                    // 读取签名块数据
+                    try (InputStream is = jar.getInputStream(sigEntry);
+                            java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream()) {
+                        byte[] buffer = new byte[8192];
+                        int len;
+                        while ((len = is.read(buffer)) != -1) {
+                            baos.write(buffer, 0, len);
+                        }
+                        sigBlockData = baos.toByteArray();
+                    }
+                    break;
+                }
+            }
+
+            if (!hasSignatureBlock) {
+                getLog().error("未找到签名块文件");
+                return false;
+            }
+
+            // 3. 提取并显示证书信息
+            if (sigBlockData != null) {
+                extractAndDisplayCertificateInfo(sigBlockData);
+            }
+
+            // 4. 检查MANIFEST.MF
+            Manifest manifest = jar.getManifest();
+            if (manifest == null) {
+                getLog().error("未找到MANIFEST.MF");
+                return false;
+            }
+
+            // 5. 验证文件摘要
+            int totalFiles = 0;
+            int filesWithDigest = 0;
+            int verifiedFiles = 0;
+
+            MessageDigest md = MessageDigest.getInstance("SM3", "BC");
+
+            entries = jar.entries();
+            while (entries.hasMoreElements()) {
+                JarEntry entry = entries.nextElement();
+                String name = entry.getName();
+
+                if (entry.isDirectory() || name.startsWith("META-INF/")) {
+                    continue;
+                }
+
+                totalFiles++;
+
+                Attributes attrs = manifest.getAttributes(name);
+                if (attrs != null) {
+                    String expectedDigest = attrs.getValue("SM3-Digest");
+                    if (expectedDigest != null) {
+                        filesWithDigest++;
+
+                        // 验证摘要
+                        try (InputStream is = jar.getInputStream(entry);
+                                java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream()) {
+                            byte[] buffer = new byte[8192];
+                            int len;
+                            while ((len = is.read(buffer)) != -1) {
+                                baos.write(buffer, 0, len);
+                            }
+
+                            byte[] actualDigest = md.digest(baos.toByteArray());
+                            String actualDigestBase64 = Base64.getEncoder().encodeToString(actualDigest);
+
+                            if (expectedDigest.equals(actualDigestBase64)) {
+                                verifiedFiles++;
+                            } else {
+                                getLog().error("文件摘要不匹配: " + name);
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+
+            getLog().info("总文件数: " + totalFiles);
+            getLog().info("已添加摘要的文件数: " + filesWithDigest);
+            getLog().info("摘要验证通过的文件数: " + verifiedFiles);
+
+            if (filesWithDigest == 0) {
+                getLog().error("没有文件被添加摘要");
+                return false;
+            }
+
+            if (filesWithDigest < totalFiles) {
+                getLog().warn("警告: 部分文件未添加摘要 (" + filesWithDigest + "/" + totalFiles + ")");
+            }
+
+            if (verifiedFiles != filesWithDigest) {
+                getLog().error("部分文件摘要验证失败");
+                return false;
+            }
+
+            return true;
+
+        } catch (Exception e) {
+            getLog().error("验证签名时出错: " + e.getMessage(), e);
+            return false;
         }
     }
 
@@ -164,47 +331,41 @@ public class SM2JarSignMojo extends AbstractMojo {
     }
 
     private PrivateKey loadPrivateKey(File keyFile) throws Exception {
-        try (FileReader fileReader = new FileReader(keyFile);
-                PEMParser pemParser = new PEMParser(fileReader)) {
-               
-               Object object = pemParser.readObject();
-               
-               if (object instanceof org.bouncycastle.asn1.pkcs.PrivateKeyInfo) {
-                   // 已经是 PrivateKeyInfo 格式
-                   JcaPEMKeyConverter converter = new JcaPEMKeyConverter().setProvider("BC");
-                   return converter.getPrivateKey((PrivateKeyInfo) object);
-               } else if (object instanceof org.bouncycastle.openssl.PEMKeyPair) {
-                   // PEMKeyPair 格式
-                   JcaPEMKeyConverter converter = new JcaPEMKeyConverter().setProvider("BC");
-                   return converter.getPrivateKey(((org.bouncycastle.openssl.PEMKeyPair) object).getPrivateKeyInfo());
-               } else {
-                   // 尝试作为 ECPrivateKey 解析
-                   String keyContent = new String(java.nio.file.Files.readAllBytes(keyFile.toPath()));
-                   keyContent = keyContent
-                       .replace("-----BEGIN EC PRIVATE KEY-----", "")
-                       .replace("-----END EC PRIVATE KEY-----", "")
-                       .replaceAll("\\s", "");
-                   
-                   byte[] keyBytes = Base64.getDecoder().decode(keyContent);
-                   
-                   // 解析 EC 私钥
-                   ECPrivateKey ecPrivateKey = ECPrivateKey.getInstance(keyBytes);
-                   
-                   // 转换为 PrivateKeyInfo (PKCS#8)
-                   PrivateKeyInfo privateKeyInfo = new PrivateKeyInfo(
-                       new org.bouncycastle.asn1.x509.AlgorithmIdentifier(
-                           X9ObjectIdentifiers.id_ecPublicKey,
-                           org.bouncycastle.asn1.gm.GMObjectIdentifiers.sm2p256v1
-                       ),
-                       ecPrivateKey
-                   );
-                   
-                   // 转换为 Java PrivateKey
-                   PKCS8EncodedKeySpec spec = new PKCS8EncodedKeySpec(privateKeyInfo.getEncoded());
-                   KeyFactory kf = KeyFactory.getInstance("EC", "BC");
-                   return kf.generatePrivate(spec);
-               }
-           }
+        try (FileReader fileReader = new FileReader(keyFile); PEMParser pemParser = new PEMParser(fileReader)) {
+
+            Object object = pemParser.readObject();
+
+            if (object instanceof org.bouncycastle.asn1.pkcs.PrivateKeyInfo) {
+                // 已经是 PrivateKeyInfo 格式
+                JcaPEMKeyConverter converter = new JcaPEMKeyConverter().setProvider("BC");
+                return converter.getPrivateKey((PrivateKeyInfo) object);
+            } else if (object instanceof org.bouncycastle.openssl.PEMKeyPair) {
+                // PEMKeyPair 格式
+                JcaPEMKeyConverter converter = new JcaPEMKeyConverter().setProvider("BC");
+                return converter.getPrivateKey(((org.bouncycastle.openssl.PEMKeyPair) object).getPrivateKeyInfo());
+            } else {
+                // 尝试作为 ECPrivateKey 解析
+                String keyContent = new String(java.nio.file.Files.readAllBytes(keyFile.toPath()));
+                keyContent = keyContent.replace("-----BEGIN EC PRIVATE KEY-----", "")
+                        .replace("-----END EC PRIVATE KEY-----", "").replaceAll("\\s", "");
+
+                byte[] keyBytes = Base64.getDecoder().decode(keyContent);
+
+                // 解析 EC 私钥
+                ECPrivateKey ecPrivateKey = ECPrivateKey.getInstance(keyBytes);
+
+                // 转换为 PrivateKeyInfo (PKCS#8)
+                PrivateKeyInfo privateKeyInfo = new PrivateKeyInfo(
+                        new org.bouncycastle.asn1.x509.AlgorithmIdentifier(X9ObjectIdentifiers.id_ecPublicKey,
+                                org.bouncycastle.asn1.gm.GMObjectIdentifiers.sm2p256v1),
+                        ecPrivateKey);
+
+                // 转换为 Java PrivateKey
+                PKCS8EncodedKeySpec spec = new PKCS8EncodedKeySpec(privateKeyInfo.getEncoded());
+                KeyFactory kf = KeyFactory.getInstance("EC", "BC");
+                return kf.generatePrivate(spec);
+            }
+        }
     }
 
     private Certificate loadCertificate(File certFile) throws Exception {
@@ -228,11 +389,14 @@ public class SM2JarSignMojo extends AbstractMojo {
             }
         } else {
             manifest.getMainAttributes().putValue("Manifest-Version", "1.0");
+            manifest.getMainAttributes().putValue("Created-By", "SM2 JAR Sign Maven Plugin");
         }
 
         // 计算所有文件的SM3摘要
         MessageDigest md = MessageDigest.getInstance("SM3", "BC");
-        addFileDigests(tempDir, manifest, md);
+        int fileCount = addFileDigests(tempDir, tempDir, manifest, md);
+
+        getLog().info("已为 " + fileCount + " 个文件添加 SM3 摘要");
 
         // 写入MANIFEST.MF
         try (FileOutputStream fos = new FileOutputStream(manifestFile)) {
@@ -248,18 +412,32 @@ public class SM2JarSignMojo extends AbstractMojo {
         createSignatureBlock(sfFile, sigFile, privateKey, certificate);
     }
 
-    private void addFileDigests(File baseDir, Manifest manifest, MessageDigest md) throws Exception {
-        File[] files = baseDir.listFiles();
+    /**
+     * 递归添加文件摘要
+     * 
+     * @param rootDir    JAR 根目录
+     * @param currentDir 当前处理的目录
+     * @param manifest   Manifest 对象
+     * @param md         消息摘要算法
+     * @return 处理的文件数量
+     */
+    private int addFileDigests(File rootDir, File currentDir, Manifest manifest, MessageDigest md) throws Exception {
+        int count = 0;
+        File[] files = currentDir.listFiles();
         if (files == null)
-            return;
+            return count;
 
         for (File file : files) {
             if (file.isDirectory()) {
+                // 跳过 META-INF 目录
                 if (!file.getName().equals("META-INF")) {
-                    addFileDigests(file, manifest, md);
+                    count += addFileDigests(rootDir, file, manifest, md);
                 }
             } else {
-                String relativePath = getRelativePath(baseDir, file);
+                // 计算相对于根目录的路径
+                String relativePath = getRelativePath(rootDir, file);
+
+                // 跳过 META-INF 下的文件
                 if (!relativePath.startsWith("META-INF/")) {
                     byte[] fileBytes = java.nio.file.Files.readAllBytes(file.toPath());
                     byte[] digest = md.digest(fileBytes);
@@ -268,13 +446,20 @@ public class SM2JarSignMojo extends AbstractMojo {
                     Attributes attrs = new Attributes();
                     attrs.putValue("SM3-Digest", digestBase64);
                     manifest.getEntries().put(relativePath, attrs);
+                    count++;
                 }
             }
         }
+        return count;
     }
 
+    /**
+     * 获取相对路径
+     */
     private String getRelativePath(File baseDir, File file) {
-        return baseDir.toURI().relativize(file.toURI()).getPath();
+        String relativePath = baseDir.toURI().relativize(file.toURI()).getPath();
+        // 确保使用正斜杠（JAR 标准）
+        return relativePath.replace('\\', '/');
     }
 
     private void createSignatureFile(File manifestFile, File sfFile, MessageDigest md) throws Exception {
@@ -348,5 +533,65 @@ public class SM2JarSignMojo extends AbstractMojo {
             }
         }
         dir.delete();
+    }
+
+    /**
+     * 从签名块中提取并显示证书信息
+     */
+    private void extractAndDisplayCertificateInfo(byte[] sigBlockData) {
+        try {
+            CertificateFactory cf = CertificateFactory.getInstance("X.509", "BC");
+
+            // 尝试不同的分割点提取证书
+            for (int i = 300; i < Math.min(sigBlockData.length - 64, 2500); i++) {
+                try {
+                    byte[] certBytes = new byte[i];
+                    System.arraycopy(sigBlockData, 0, certBytes, 0, i);
+
+                    Certificate cert = cf.generateCertificate(new java.io.ByteArrayInputStream(certBytes));
+
+                    if (cert instanceof java.security.cert.X509Certificate) {
+                        java.security.cert.X509Certificate x509Cert = (java.security.cert.X509Certificate) cert;
+
+                        getLog().info("");
+                        getLog().info("证书信息:");
+                        getLog().info("  签名算法: " + x509Cert.getSigAlgName());
+                        getLog().info("  证书主题: " + x509Cert.getSubjectDN());
+                        getLog().info("  证书颁发者: " + x509Cert.getIssuerDN());
+                        getLog().info("  证书序列号: " + x509Cert.getSerialNumber().toString(16).toUpperCase());
+                        getLog().info("  证书有效期: " + x509Cert.getNotBefore() + " 至 " + x509Cert.getNotAfter());
+
+                        // 检查证书有效性
+                        try {
+                            x509Cert.checkValidity();
+                            getLog().info("  证书状态: ✓ 有效");
+                        } catch (Exception e) {
+                            getLog().warn("  证书状态: ✗ 已过期或未生效");
+                        }
+
+                        // 显示公钥信息
+                        PublicKey publicKey = x509Cert.getPublicKey();
+                        getLog().info("  公钥算法: " + publicKey.getAlgorithm());
+                        getLog().info("  公钥格式: " + publicKey.getFormat());
+
+                        // 计算证书剩余有效天数
+                        long daysUntilExpiry = (x509Cert.getNotAfter().getTime() - System.currentTimeMillis())
+                                / (1000 * 60 * 60 * 24);
+                        if (daysUntilExpiry > 0 && daysUntilExpiry < 90) {
+                            getLog().warn("  警告: 证书将在 " + daysUntilExpiry + " 天后过期！");
+                        }
+
+                        return; // 成功提取，退出
+                    }
+                } catch (Exception e) {
+                    // 继续尝试下一个分割点
+                }
+            }
+
+            getLog().warn("无法从签名块中提取证书信息");
+
+        } catch (Exception e) {
+            getLog().warn("提取证书信息失败: " + e.getMessage());
+        }
     }
 }
