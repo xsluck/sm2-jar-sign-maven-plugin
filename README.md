@@ -101,7 +101,6 @@ mvn clean package
 | `keyFile` | File | 是 | - | SM2 私钥文件路径（PEM 格式，PKCS#8） |
 | `certFile` | File | 是 | - | SM2 证书文件路径（PEM 格式） |
 | `alias` | String | 否 | sm2signer | 签名别名 |
-| `password` | String | 否 | - | 私钥密码（如果私钥加密） |
 | `skip` | Boolean | 否 | false | 是否跳过签名 |
 | `outputFile` | File | 否 | - | 输出文件路径（默认覆盖原文件） |
 
@@ -116,7 +115,6 @@ mvn clean package
     <jar.sign.keyfile>${project.basedir}/keystore/sm2-pkcs8.key</jar.sign.keyfile>
     <jar.sign.certfile>${project.basedir}/keystore/sm2.crt</jar.sign.certfile>
     <jar.sign.alias>sm2signer</jar.sign.alias>
-    <jar.sign.password></jar.sign.password>
 </properties>
 
 <build>
@@ -130,7 +128,6 @@ mvn clean package
                 <keyFile>${jar.sign.keyfile}</keyFile>
                 <certFile>${jar.sign.certfile}</certFile>
                 <alias>${jar.sign.alias}</alias>
-                <password>${jar.sign.password}</password>
                 <skip>${skipJarSign}</skip>
             </configuration>
         </plugin>
