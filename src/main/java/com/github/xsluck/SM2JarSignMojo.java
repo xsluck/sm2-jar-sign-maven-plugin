@@ -18,13 +18,16 @@ import java.security.Signature;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.jar.Attributes;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
+import java.util.zip.ZipEntry;
 
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
@@ -163,14 +166,12 @@ public class SM2JarSignMojo extends AbstractMojo {
             String[] extensions = { ".SM2", ".RSA", ".DSA", ".EC" };
             boolean hasSignatureBlock = false;
             byte[] sigBlockData = null;
-            String sigBlockFileName = null;
 
             for (String ext : extensions) {
                 String fileName = "META-INF/" + signerAlias + ext;
                 JarEntry sigEntry = jar.getJarEntry(fileName);
                 if (sigEntry != null) {
                     hasSignatureBlock = true;
-                    sigBlockFileName = fileName;
                     getLog().info("找到签名块文件: " + fileName);
 
                     // 读取签名块数据
@@ -299,7 +300,9 @@ public class SM2JarSignMojo extends AbstractMojo {
             // 4. 重新打包
             getLog().info("重新打包JAR...");
             packJar(tempDir, outputJar);
-
+            // 5. 验证 JAR 结构
+            getLog().info("验证JAR文件结构...");
+            validateJarStructure(outputJar);
         } finally {
             // 清理临时目录
             deleteDirectory(tempDir);
@@ -380,14 +383,33 @@ public class SM2JarSignMojo extends AbstractMojo {
         File metaInf = new File(tempDir, "META-INF");
         metaInf.mkdirs();
 
-        // 创建或更新 MANIFEST.MF
+        // 读取原始 MANIFEST.MF
         File manifestFile = new File(metaInf, "MANIFEST.MF");
         Manifest manifest = new Manifest();
+
         if (manifestFile.exists()) {
             try (FileInputStream fis = new FileInputStream(manifestFile)) {
-                manifest.read(fis);
+                // 读取原始 MANIFEST
+                manifest = new Manifest(fis);
+
+                // 确保必要的版本信息
+                if (manifest.getMainAttributes().getValue("Manifest-Version") == null) {
+                    manifest.getMainAttributes().putValue("Manifest-Version", "1.0");
+                }
+
+                // 更新 Created-By 属性
+                manifest.getMainAttributes().putValue("Created-By", "SM2 JAR Sign Maven Plugin");
+
+                getLog().info("成功读取原始 MANIFEST.MF，包含 " + manifest.getMainAttributes().size() + " 个主属性，"
+                        + manifest.getEntries().size() + " 个条目");
+
+            } catch (Exception e) {
+                getLog().warn("读取原始 MANIFEST.MF 失败: " + e.getMessage() + "，创建新的");
+                manifest.getMainAttributes().putValue("Manifest-Version", "1.0");
+                manifest.getMainAttributes().putValue("Created-By", "SM2 JAR Sign Maven Plugin");
             }
         } else {
+            // 如果没有原始 MANIFEST，创建新的
             manifest.getMainAttributes().putValue("Manifest-Version", "1.0");
             manifest.getMainAttributes().putValue("Created-By", "SM2 JAR Sign Maven Plugin");
         }
@@ -443,9 +465,15 @@ public class SM2JarSignMojo extends AbstractMojo {
                     byte[] digest = md.digest(fileBytes);
                     String digestBase64 = Base64.getEncoder().encodeToString(digest);
 
-                    Attributes attrs = new Attributes();
+                    // 获取或创建该文件的属性
+                    Attributes attrs = manifest.getEntries().get(relativePath);
+                    if (attrs == null) {
+                        attrs = new Attributes();
+                        manifest.getEntries().put(relativePath, attrs);
+                    }
+
+                    // 添加 SM3 摘要（不覆盖现有的其他摘要）
                     attrs.putValue("SM3-Digest", digestBase64);
-                    manifest.getEntries().put(relativePath, attrs);
                     count++;
                 }
             }
@@ -492,21 +520,76 @@ public class SM2JarSignMojo extends AbstractMojo {
 
     private void packJar(File sourceDir, File jarFile) throws IOException {
         try (JarOutputStream jos = new JarOutputStream(new FileOutputStream(jarFile))) {
+            // 步骤1: 添加 MANIFEST.MF 作为第一个条目
+            addManifestFirst(sourceDir, jos);
+
+            // 步骤2: 添加其他所有文件和目录（排序后）
             addDirectoryToJar(sourceDir, sourceDir, jos);
         }
     }
 
-    private void addDirectoryToJar(File baseDir, File source, JarOutputStream jos) throws IOException {
-        File[] files = source.listFiles();
+    private void addManifestFirst(File sourceDir, JarOutputStream jos) throws IOException {
+        File manifestFile = new File(sourceDir, "META-INF/MANIFEST.MF");
+        if (manifestFile.exists()) {
+            String entryName = "META-INF/MANIFEST.MF";
+            JarEntry entry = new JarEntry(entryName);
+            entry.setTime(manifestFile.lastModified());
+            entry.setSize(manifestFile.length());
+
+            jos.putNextEntry(entry);
+
+            try (FileInputStream fis = new FileInputStream(manifestFile)) {
+                byte[] buffer = new byte[8192];
+                int len;
+                while ((len = fis.read(buffer)) != -1) {
+                    jos.write(buffer, 0, len);
+                }
+            }
+            jos.closeEntry();
+
+            getLog().info("已添加 MANIFEST.MF 作为第一个条目");
+        } else {
+            getLog().warn("未找到 MANIFEST.MF");
+        }
+    }
+
+    private void addDirectoryToJar(File baseDir, File currentDir, JarOutputStream jos) throws IOException {
+        File[] files = currentDir.listFiles();
         if (files == null)
             return;
 
+        // 排序文件和目录（字母顺序）
+        Arrays.sort(files, Comparator.comparing(File::getName));
+
         for (File file : files) {
+            String relativePath = getRelativePath(baseDir, file);
+
+            // 跳过已经添加的 MANIFEST.MF
+            if (relativePath.equals("META-INF/MANIFEST.MF")) {
+                continue;
+            }
+
             if (file.isDirectory()) {
+                // 添加目录条目（以 / 结尾）
+                String dirPath = relativePath.endsWith("/") ? relativePath : relativePath + "/";
+                JarEntry dirEntry = new JarEntry(dirPath);
+                dirEntry.setTime(file.lastModified());
+                jos.putNextEntry(dirEntry);
+                jos.closeEntry();
+
+                // 递归添加子目录内容
                 addDirectoryToJar(baseDir, file, jos);
             } else {
-                String entryName = getRelativePath(baseDir, file);
-                JarEntry entry = new JarEntry(entryName);
+                // 添加文件
+                JarEntry entry = new JarEntry(relativePath);
+                entry.setTime(file.lastModified());
+                entry.setSize(file.length());
+
+                // 设置权限（如果可执行）
+                if (Files.isExecutable(file.toPath())) {
+                    entry.setMethod(ZipEntry.DEFLATED);
+                }
+
                 jos.putNextEntry(entry);
 
                 try (FileInputStream fis = new FileInputStream(file)) {
@@ -533,6 +616,46 @@ public class SM2JarSignMojo extends AbstractMojo {
             }
         }
         dir.delete();
+    }
+
+    private void validateJarStructure(File jarFile) throws IOException {
+        try (JarFile jar = new JarFile(jarFile)) {
+            // 检查第一个条目是否是 MANIFEST.MF
+            Enumeration<JarEntry> entries = jar.entries();
+            if (entries.hasMoreElements()) {
+                JarEntry firstEntry = entries.nextElement();
+                if (!"META-INF/MANIFEST.MF".equals(firstEntry.getName())) {
+                    getLog().warn("警告: MANIFEST.MF 不是第一个条目: " + firstEntry.getName());
+                } else {
+                    getLog().info("✓ MANIFEST.MF 是第一个条目");
+                }
+            }
+
+            // 检查是否有目录条目
+            boolean hasDirEntry = false;
+            entries = jar.entries();
+            while (entries.hasMoreElements()) {
+                JarEntry entry = entries.nextElement();
+                if (entry.isDirectory()) {
+                    hasDirEntry = true;
+                    break;
+                }
+            }
+            if (hasDirEntry) {
+                getLog().info("✓ 包含目录条目");
+            } else {
+                getLog().warn("警告: 缺少目录条目");
+            }
+
+            // 检查 Main-Class
+            Manifest manifest = jar.getManifest();
+            String mainClass = manifest.getMainAttributes().getValue("Main-Class");
+            if (mainClass != null) {
+                getLog().info("✓ 找到 Main-Class: " + mainClass);
+            } else {
+                getLog().warn("警告: 未找到 Main-Class");
+            }
+        }
     }
 
     /**

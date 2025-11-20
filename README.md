@@ -472,6 +472,15 @@ mvn clean package -Pprod
 [INFO] ✓ 签名验证通过 - JAR包已正确签名
 ```
 
+**方法 2：测试 JAR 运行**
+
+使用测试脚本验证签名前后 JAR 包是否都能正常运行：
+```bash
+./test-jar-run.sh original.jar signed.jar
+```
+
+**注意：** 签名后的 JAR 包必须能够正常运行。如果签名后无法运行，通常是 MANIFEST.MF 被破坏。
+
 **方法 2：使用插件的 verify goal**
 ```bash
 mvn com.github.xsluck:sm2-jar-sign-maven-plugin:0.0.1:verify \
@@ -499,6 +508,39 @@ jar -tf target/your-app.jar | grep META-INF
 - 开发环境跳过签名（`-Pdev`）
 - 仅在测试和生产环境启用签名
 - 使用 CI/CD 自动化签名过程
+
+### Q6: 签名后 JAR 包无法运行怎么办？
+
+**原因分析：**
+签名过程可能破坏了 `MANIFEST.MF` 文件，导致丢失重要信息如 `Main-Class`、`Class-Path` 等。
+
+**解决步骤：**
+1. **检查 MANIFEST.MF**：
+   ```bash
+   jar xf your-app.jar META-INF/MANIFEST.MF
+   cat META-INF/MANIFEST.MF
+   ```
+
+2. **比较签名前后**：
+   ```bash
+   # 签名前
+   unzip -q -c original.jar META-INF/MANIFEST.MF | grep "Main-Class"
+   # 签名后
+   unzip -q -c signed.jar META-INF/MANIFEST.MF | grep "Main-Class"
+   ```
+
+3. **使用测试脚本**：
+   ```bash
+   ./test-jar-run.sh original.jar signed.jar
+   ```
+
+**常见问题：**
+- ❌ `Main-Class` 属性丢失
+- ❌ `Class-Path` 属性丢失
+- ❌ 其他 Spring Boot 或应用需要的属性丢失
+
+**解决方案：**
+插件已修复此问题，重新签名应该能保留所有原始 MANIFEST 属性。
 
 ### Q6: 如何查看证书信息？
 
@@ -730,7 +772,14 @@ public class Application {
 
 ## 📝 更新日志
 
-### v0.0.2 (最新)
+### v0.0.3 (最新)
+- 🐛 **重要修复**：签名后 JAR 包无法运行的问题
+- 🐛 修复：MANIFEST.MF 主属性丢失（如 Main-Class、Class-Path）
+- 🐛 修复：签名摘要覆盖现有摘要的问题
+- 📝 改进：保留原始 MANIFEST.MF 的所有属性
+- ✅ 新增：MANIFEST.MF 读取和处理验证
+
+### v0.0.2
 - ✨ 新增：签名时显示处理的文件数量统计
 - ✨ 新增：验证时显示完整的证书信息（主题、颁发者、有效期等）
 - ✨ 新增：证书有效期检查和过期提醒（90天内过期会警告）
@@ -747,6 +796,6 @@ public class Application {
 
 ---
 
-**当前版本**: 0.0.2  
+**当前版本**: 0.0.3  
 **最后更新**: 2025-11-20
 
