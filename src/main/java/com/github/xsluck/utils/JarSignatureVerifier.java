@@ -1,17 +1,13 @@
 package com.github.xsluck.utils;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URISyntaxException;
-import java.security.MessageDigest;
 import java.security.PublicKey;
 import java.security.Security;
 import java.security.Signature;
-import java.security.cert.Certificate;
-import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -25,10 +21,12 @@ import java.util.jar.JarFile;
 import java.util.jar.Manifest;
 
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.zz.gmhelper.SM3Util;
 
 /**
  * JAR包SM2签名运行时验证工具 用于在应用启动时验证JAR包的完整性和签名
  */
+
 public class JarSignatureVerifier {
 
     static {
@@ -47,6 +45,7 @@ public class JarSignatureVerifier {
         private List<String> details = new ArrayList<>();
         private String signerAlias;
         private X509Certificate certificate;
+        private List<X509Certificate> certificateChain = new ArrayList<>();
         private int totalFiles;
         private int verifiedFiles;
 
@@ -90,6 +89,18 @@ public class JarSignatureVerifier {
             this.certificate = certificate;
         }
 
+        public List<X509Certificate> getCertificateChain() {
+            return certificateChain;
+        }
+
+        public void setCertificateChain(List<X509Certificate> certificateChain) {
+            this.certificateChain = certificateChain;
+            // 同时设置叶子证书
+            if (certificateChain != null && !certificateChain.isEmpty()) {
+                this.certificate = certificateChain.get(0);
+            }
+        }
+
         public int getTotalFiles() {
             return totalFiles;
         }
@@ -119,7 +130,36 @@ public class JarSignatureVerifier {
                 sb.append("签名者: ").append(signerAlias).append("\n");
             }
 
-            if (certificate != null) {
+            // 显示证书链信息
+            if (!certificateChain.isEmpty()) {
+                sb.append("\n证书链信息 (共 ").append(certificateChain.size()).append(" 个证书):\n");
+                for (int i = 0; i < certificateChain.size(); i++) {
+                    X509Certificate cert = certificateChain.get(i);
+                    sb.append("\n  证书 ").append(i + 1).append(":\n");
+                    sb.append("    主题: ").append(cert.getSubjectDN()).append("\n");
+                    sb.append("    颁发者: ").append(cert.getIssuerDN()).append("\n");
+                    sb.append("    有效期: ").append(cert.getNotBefore()).append(" 至 ").append(cert.getNotAfter())
+                            .append("\n");
+
+                    // 检查证书是否过期
+                    try {
+                        cert.checkValidity();
+                        sb.append("    状态: 有效\n");
+                    } catch (Exception e) {
+                        sb.append("    状态: 已过期或未生效\n");
+                    }
+
+                    // 标识证书类型
+                    if (cert.getSubjectDN().equals(cert.getIssuerDN())) {
+                        sb.append("    类型: 自签名证书（根证书）\n");
+                    } else if (i == 0) {
+                        sb.append("    类型: 叶子证书（签名证书）\n");
+                    } else {
+                        sb.append("    类型: CA证书\n");
+                    }
+                }
+            } else if (certificate != null) {
+                // 兼容单证书模式
                 sb.append("证书主题: ").append(certificate.getSubjectDN()).append("\n");
                 sb.append("证书颁发者: ").append(certificate.getIssuerDN()).append("\n");
                 sb.append("证书有效期: ").append(certificate.getNotBefore()).append(" 至 ").append(certificate.getNotAfter())
@@ -135,7 +175,7 @@ public class JarSignatureVerifier {
             }
 
             if (totalFiles > 0) {
-                sb.append("总文件数: ").append(totalFiles).append("\n");
+                sb.append("\n总文件数: ").append(totalFiles).append("\n");
                 sb.append("已验证文件数: ").append(verifiedFiles).append("\n");
             }
 
@@ -165,7 +205,6 @@ public class JarSignatureVerifier {
             result.setMessage("JAR文件不存在: " + jarPath);
             return result;
         }
-
         try (JarFile jar = new JarFile(jarFile, true)) {
             // 1. 查找签名文件
             Map<String, String> signatureFiles = findSignatureFiles(jar);
@@ -175,9 +214,7 @@ public class JarSignatureVerifier {
                 result.addDetail("JAR包未签名");
                 return result;
             }
-
             result.addDetail("找到 " + signatureFiles.size() + " 个签名");
-
             // 2. 获取MANIFEST.MF
             Manifest manifest = jar.getManifest();
             if (manifest == null) {
@@ -185,7 +222,6 @@ public class JarSignatureVerifier {
                 result.setMessage("未找到MANIFEST.MF文件");
                 return result;
             }
-
             // 3. 验证每个签名
             for (Map.Entry<String, String> entry : signatureFiles.entrySet()) {
                 String alias = entry.getKey();
@@ -193,18 +229,15 @@ public class JarSignatureVerifier {
 
                 result.setSignerAlias(alias);
                 result.addDetail("验证签名: " + alias);
-
                 // 验证签名文件和提取证书
                 if (!verifySignatureFile(jar, sfFileName, alias, result)) {
                     return result;
                 }
             }
-
             // 4. 验证所有文件的完整性
             if (!verifyAllFiles(jar, manifest, result)) {
                 return result;
             }
-
             result.setValid(true);
             result.setMessage("签名验证通过");
             return result;
@@ -274,24 +307,40 @@ public class JarSignatureVerifier {
                 return false;
             }
 
-            // 从签名块中提取证书（公钥在证书中）
-            X509Certificate cert = extractCertificateFromSignatureBlock(sigBlockData, result);
-            if (cert != null) {
-                result.setCertificate(cert);
-                result.addDetail("成功提取证书（公钥）");
+            result.addDetail("签名块大小: " + sigBlockData.length + " 字节");
 
-                // 验证证书有效期
-                try {
-                    cert.checkValidity();
-                    result.addDetail("证书有效");
-                } catch (Exception e) {
-                    result.addDetail("警告: 证书已过期或未生效");
+            // 从签名块中提取证书链（公钥在叶子证书中）
+            List<X509Certificate> certChain = extractCertificateChainFromSignatureBlock(sigBlockData, result);
+            if (certChain != null && !certChain.isEmpty()) {
+                result.setCertificateChain(certChain);
+                result.addDetail("成功提取证书链（共 " + certChain.size() + " 个证书）");
+
+                // 验证证书链
+                if (certChain.size() > 1) {
+                    CertificateChainUtil.ChainValidationResult chainResult = CertificateChainUtil
+                            .validateCertificateChain(certChain, null);
+                    if (chainResult.isValid()) {
+                        result.addDetail("证书链验证通过");
+                    } else {
+                        result.addDetail("警告: 证书链验证失败 - " + chainResult.getMessage());
+                    }
                 }
 
-                // 使用证书中的公钥验证签名
-                return verifySignatureWithPublicKey(sfData, sigBlockData, cert, result);
+                // 验证叶子证书有效期
+                X509Certificate leafCert = certChain.get(0);
+                try {
+                    leafCert.checkValidity();
+                    result.addDetail("叶子证书有效");
+                } catch (Exception e) {
+                    result.addDetail("警告: 叶子证书已过期或未生效");
+                }
+
+                // 使用叶子证书中的公钥验证签名
+                return verifySignatureWithPublicKey(sfData, sigBlockData, certChain, result);
             }
 
+            // 证书提取失败，但文件完整性仍然可以验证
+            result.addDetail("警告: 无法提取证书，跳过签名数据验证");
             return true;
 
         } catch (Exception e) {
@@ -302,33 +351,23 @@ public class JarSignatureVerifier {
     }
 
     /**
-     * 从签名块中提取证书（证书包含公钥）
+     * 从签名块中提取证书链（证书包含公钥）
      */
-    private static X509Certificate extractCertificateFromSignatureBlock(byte[] sigBlockData,
+    private static List<X509Certificate> extractCertificateChainFromSignatureBlock(byte[] sigBlockData,
             VerificationResult result) {
         try {
-            CertificateFactory cf = CertificateFactory.getInstance("X.509", "BC");
-
-            // 尝试不同的分割点提取证书
-            for (int i = 300; i < Math.min(sigBlockData.length - 64, 2500); i++) {
-                try {
-                    byte[] certBytes = new byte[i];
-                    System.arraycopy(sigBlockData, 0, certBytes, 0, i);
-
-                    Certificate cert = cf.generateCertificate(new ByteArrayInputStream(certBytes));
-                    if (cert instanceof X509Certificate) {
-                        return (X509Certificate) cert;
-                    }
-                } catch (Exception e) {
-                    // 继续尝试下一个分割点
-                }
+            // 使用 CertificateChainUtil 提取证书链
+            List<X509Certificate> certChain = CertificateChainUtil
+                    .extractCertificateChainFromSignatureBlock(sigBlockData);
+            if (!certChain.isEmpty()) {
+                return certChain;
             }
 
-            result.addDetail("警告: 无法提取证书");
+            result.addDetail("警告: 无法提取证书链");
             return null;
 
         } catch (Exception e) {
-            result.addDetail("提取证书失败: " + e.getMessage());
+            result.addDetail("提取证书链失败: " + e.getMessage());
             return null;
         }
     }
@@ -336,13 +375,33 @@ public class JarSignatureVerifier {
     /**
      * 使用公钥验证签名
      */
-    private static boolean verifySignatureWithPublicKey(byte[] sfData, byte[] sigBlockData, X509Certificate cert,
-            VerificationResult result) {
+    private static boolean verifySignatureWithPublicKey(byte[] sfData, byte[] sigBlockData,
+            List<X509Certificate> certChain, VerificationResult result) {
         try {
-            PublicKey publicKey = cert.getPublicKey();
+            // 使用叶子证书的公钥验证签名
+            X509Certificate leafCert = certChain.get(0);
+            PublicKey publicKey = leafCert.getPublicKey();
 
-            // 尝试不同的分割点提取签名数据
-            for (int i = 300; i < Math.min(sigBlockData.length - 64, 2500); i++) {
+            // 计算证书链编码数据的长度，以便定位签名数据
+            byte[] chainData = CertificateChainUtil.encodeCertificateChain(certChain);
+            int signatureOffset = chainData.length;
+
+            if (signatureOffset < sigBlockData.length) {
+                byte[] signatureBytes = new byte[sigBlockData.length - signatureOffset];
+                System.arraycopy(sigBlockData, signatureOffset, signatureBytes, 0, signatureBytes.length);
+
+                Signature signature = Signature.getInstance("SM3withSM2", "BC");
+                signature.initVerify(publicKey);
+                signature.update(sfData);
+
+                if (signature.verify(signatureBytes)) {
+                    result.addDetail("签名验证成功（使用叶子证书公钥）");
+                    return true;
+                }
+            }
+
+            // 如果精确偏移失败，尝试不同的分割点
+            for (int i = 300; i < Math.min(sigBlockData.length - 64, 5000); i++) {
                 try {
                     byte[] signatureBytes = new byte[sigBlockData.length - i];
                     System.arraycopy(sigBlockData, i, signatureBytes, 0, signatureBytes.length);
@@ -352,7 +411,7 @@ public class JarSignatureVerifier {
                     signature.update(sfData);
 
                     if (signature.verify(signatureBytes)) {
-                        result.addDetail("签名验证成功（使用公钥）");
+                        result.addDetail("签名验证成功（使用叶子证书公钥）");
                         return true;
                     }
                 } catch (Exception e) {
@@ -377,7 +436,6 @@ public class JarSignatureVerifier {
             int totalFiles = 0;
             int verifiedFiles = 0;
 
-            MessageDigest md = MessageDigest.getInstance("SM3", "BC");
             Enumeration<JarEntry> entries = jar.entries();
 
             while (entries.hasMoreElements()) {
@@ -395,7 +453,8 @@ public class JarSignatureVerifier {
                     String expectedDigest = attrs.getValue("SM3-Digest");
                     if (expectedDigest != null) {
                         byte[] fileData = readEntryData(jar, entry);
-                        byte[] actualDigest = md.digest(fileData);
+
+                        byte[] actualDigest = SM3Util.hash(fileData);
                         String actualDigestBase64 = Base64.getEncoder().encodeToString(actualDigest);
 
                         if (expectedDigest.equals(actualDigestBase64)) {
